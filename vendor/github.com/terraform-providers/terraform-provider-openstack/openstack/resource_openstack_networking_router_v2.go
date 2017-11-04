@@ -18,6 +18,9 @@ func resourceNetworkingRouterV2() *schema.Resource {
 		Read:   resourceNetworkingRouterV2Read,
 		Update: resourceNetworkingRouterV2Update,
 		Delete: resourceNetworkingRouterV2Delete,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Timeouts: &schema.ResourceTimeout{
 			Create: schema.DefaultTimeout(10 * time.Minute),
@@ -26,10 +29,10 @@ func resourceNetworkingRouterV2() *schema.Resource {
 
 		Schema: map[string]*schema.Schema{
 			"region": &schema.Schema{
-				Type:        schema.TypeString,
-				Required:    true,
-				ForceNew:    true,
-				DefaultFunc: schema.EnvDefaultFunc("OS_REGION_NAME", ""),
+				Type:     schema.TypeString,
+				Optional: true,
+				ForceNew: true,
+				Computed: true,
 			},
 			"name": &schema.Schema{
 				Type:     schema.TypeString,
@@ -52,6 +55,13 @@ func resourceNetworkingRouterV2() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: false,
+				Computed: true,
+			},
+			"enable_snat": &schema.Schema{
+				Type:     schema.TypeBool,
+				Optional: true,
+				ForceNew: false,
+				Computed: true,
 			},
 			"tenant_id": &schema.Schema{
 				Type:     schema.TypeString,
@@ -99,6 +109,14 @@ func resourceNetworkingRouterV2Create(d *schema.ResourceData, meta interface{}) 
 			NetworkID: externalGateway,
 		}
 		createOpts.GatewayInfo = &gatewayInfo
+	}
+
+	if esRaw, ok := d.GetOk("enable_snat"); ok {
+		if externalGateway == "" {
+			return fmt.Errorf("Error setting enable_snat: option requires external_gateway to be set")
+		}
+		es := esRaw.(bool)
+		createOpts.GatewayInfo.EnableSNAT = &es
 	}
 
 	log.Printf("[DEBUG] Create Options: %#v", createOpts)
@@ -149,6 +167,7 @@ func resourceNetworkingRouterV2Read(d *schema.ResourceData, meta interface{}) er
 	d.Set("distributed", n.Distributed)
 	d.Set("tenant_id", n.TenantID)
 	d.Set("external_gateway", n.GatewayInfo.NetworkID)
+	d.Set("enable_snat", n.GatewayInfo.EnableSNAT)
 	d.Set("region", GetRegion(d, config))
 
 	return nil
@@ -173,13 +192,22 @@ func resourceNetworkingRouterV2Update(d *schema.ResourceData, meta interface{}) 
 		asu := d.Get("admin_state_up").(bool)
 		updateOpts.AdminStateUp = &asu
 	}
+
+	gatewayInfo := routers.GatewayInfo{}
+	externalGateway := d.Get("external_gateway").(string)
+	if externalGateway != "" {
+		gatewayInfo.NetworkID = externalGateway
+	}
 	if d.HasChange("external_gateway") {
-		externalGateway := d.Get("external_gateway").(string)
-		if externalGateway != "" {
-			gatewayInfo := routers.GatewayInfo{
-				NetworkID: externalGateway,
-			}
+		updateOpts.GatewayInfo = &gatewayInfo
+	}
+	if d.HasChange("enable_snat") {
+		enableSNAT := d.Get("enable_snat").(bool)
+		gatewayInfo.EnableSNAT = &enableSNAT
+		if gatewayInfo.NetworkID != "" {
 			updateOpts.GatewayInfo = &gatewayInfo
+		} else {
+			return fmt.Errorf("Error setting enable_snat: option requires external_gateway to be set")
 		}
 	}
 

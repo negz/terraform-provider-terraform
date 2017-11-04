@@ -32,13 +32,15 @@ import (
 )
 
 const (
-	apiPath = "/rpc_http"
+	apiPath             = "/rpc_http"
+	defaultTicketSuffix = "/default.20150612t184001.0"
 )
 
 var (
 	// Incoming headers.
 	ticketHeader       = http.CanonicalHeaderKey("X-AppEngine-API-Ticket")
 	dapperHeader       = http.CanonicalHeaderKey("X-Google-DapperTraceInfo")
+	traceHeader        = http.CanonicalHeaderKey("X-Cloud-Trace-Context")
 	curNamespaceHeader = http.CanonicalHeaderKey("X-AppEngine-Current-Namespace")
 	userIPHeader       = http.CanonicalHeaderKey("X-AppEngine-User-IP")
 	remoteAddrHeader   = http.CanonicalHeaderKey("X-AppEngine-Remote-Addr")
@@ -59,23 +61,31 @@ var (
 			Dial:  limitDial,
 		},
 	}
+
+	defaultTicketOnce sync.Once
+	defaultTicket     string
 )
 
-func apiHost() string {
-	host, port := "appengine.googleapis.com", "10001"
+func apiURL() *url.URL {
+	host, port := "appengine.googleapis.internal", "10001"
 	if h := os.Getenv("API_HOST"); h != "" {
 		host = h
 	}
 	if p := os.Getenv("API_PORT"); p != "" {
 		port = p
 	}
-	return host + ":" + port
+	return &url.URL{
+		Scheme: "http",
+		Host:   host + ":" + port,
+		Path:   apiPath,
+	}
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	c := &context{
 		req:       r,
 		outHeader: w.Header(),
+		apiURL:    apiURL(),
 	}
 	stopFlushing := make(chan int)
 
@@ -189,6 +199,10 @@ var ctxs = struct {
 	sync.Mutex
 	m  map[*http.Request]*context
 	bg *context // background context, lazily initialized
+	// dec is used by tests to decorate the netcontext.Context returned
+	// for a given request. This allows tests to add overrides (such as
+	// WithAppIDOverride) to the context. The map is nil outside tests.
+	dec map[*http.Request]func(netcontext.Context) netcontext.Context
 }{
 	m: make(map[*http.Request]*context),
 }
@@ -207,10 +221,14 @@ type context struct {
 		lines   []*logpb.UserAppLogLine
 		flushes int
 	}
+
+	apiURL *url.URL
 }
 
 var contextKey = "holds a *context"
 
+// fromContext returns the App Engine context or nil if ctx is not
+// derived from an App Engine context.
 func fromContext(ctx netcontext.Context) *context {
 	c, _ := ctx.Value(&contextKey).(*context)
 	return c
@@ -219,7 +237,7 @@ func fromContext(ctx netcontext.Context) *context {
 func withContext(parent netcontext.Context, c *context) netcontext.Context {
 	ctx := netcontext.WithValue(parent, &contextKey, c)
 	if ns := c.req.Header.Get(curNamespaceHeader); ns != "" {
-		ctx = WithNamespace(ctx, ns)
+		ctx = withNamespace(ctx, ns)
 	}
 	return ctx
 }
@@ -238,7 +256,12 @@ func IncomingHeaders(ctx netcontext.Context) http.Header {
 func WithContext(parent netcontext.Context, req *http.Request) netcontext.Context {
 	ctxs.Lock()
 	c := ctxs.m[req]
+	d := ctxs.dec[req]
 	ctxs.Unlock()
+
+	if d != nil {
+		parent = d(parent)
+	}
 
 	if c == nil {
 		// Someone passed in an http.Request that is not in-flight.
@@ -247,6 +270,24 @@ func WithContext(parent netcontext.Context, req *http.Request) netcontext.Contex
 		log.Panic("appengine: NewContext passed an unknown http.Request")
 	}
 	return withContext(parent, c)
+}
+
+// DefaultTicket returns a ticket used for background context or dev_appserver.
+func DefaultTicket() string {
+	defaultTicketOnce.Do(func() {
+		if IsDevAppServer() {
+			defaultTicket = "testapp" + defaultTicketSuffix
+			return
+		}
+		appID := partitionlessAppID()
+		escAppID := strings.Replace(strings.Replace(appID, ":", "_", -1), ".", "_", -1)
+		majVersion := VersionID(nil)
+		if i := strings.Index(majVersion, "."); i > 0 {
+			majVersion = majVersion[:i]
+		}
+		defaultTicket = fmt.Sprintf("%s/%s.%s.%s", escAppID, ModuleName(nil), majVersion, InstanceID())
+	})
+	return defaultTicket
 }
 
 func BackgroundContext() netcontext.Context {
@@ -258,13 +299,7 @@ func BackgroundContext() netcontext.Context {
 	}
 
 	// Compute background security ticket.
-	appID := partitionlessAppID()
-	escAppID := strings.Replace(strings.Replace(appID, ":", "_", -1), ".", "_", -1)
-	majVersion := VersionID(nil)
-	if i := strings.Index(majVersion, "_"); i >= 0 {
-		majVersion = majVersion[:i]
-	}
-	ticket := fmt.Sprintf("%s/%s.%s.%s", escAppID, ModuleName(nil), majVersion, InstanceID())
+	ticket := DefaultTicket()
 
 	ctxs.bg = &context{
 		req: &http.Request{
@@ -272,12 +307,44 @@ func BackgroundContext() netcontext.Context {
 				ticketHeader: []string{ticket},
 			},
 		},
+		apiURL: apiURL(),
 	}
 
 	// TODO(dsymonds): Wire up the shutdown handler to do a final flush.
 	go ctxs.bg.logFlusher(make(chan int))
 
 	return toContext(ctxs.bg)
+}
+
+// RegisterTestRequest registers the HTTP request req for testing, such that
+// any API calls are sent to the provided URL. It returns a closure to delete
+// the registration.
+// It should only be used by aetest package.
+func RegisterTestRequest(req *http.Request, apiURL *url.URL, decorate func(netcontext.Context) netcontext.Context) func() {
+	c := &context{
+		req:    req,
+		apiURL: apiURL,
+	}
+	ctxs.Lock()
+	defer ctxs.Unlock()
+	if _, ok := ctxs.m[req]; ok {
+		log.Panic("req already associated with context")
+	}
+	if _, ok := ctxs.dec[req]; ok {
+		log.Panic("req already associated with context")
+	}
+	if ctxs.dec == nil {
+		ctxs.dec = make(map[*http.Request]func(netcontext.Context) netcontext.Context)
+	}
+	ctxs.m[req] = c
+	ctxs.dec[req] = decorate
+
+	return func() {
+		ctxs.Lock()
+		delete(ctxs.m, req)
+		delete(ctxs.dec, req)
+		ctxs.Unlock()
+	}
 }
 
 var errTimeout = &CallError{
@@ -323,14 +390,9 @@ func (c *context) WriteHeader(code int) {
 }
 
 func (c *context) post(body []byte, timeout time.Duration) (b []byte, err error) {
-	dst := apiHost()
 	hreq := &http.Request{
 		Method: "POST",
-		URL: &url.URL{
-			Scheme: "http",
-			Host:   dst,
-			Path:   apiPath,
-		},
+		URL:    c.apiURL,
 		Header: http.Header{
 			apiEndpointHeader: apiEndpointHeaderValue,
 			apiMethodHeader:   apiMethodHeaderValue,
@@ -339,10 +401,13 @@ func (c *context) post(body []byte, timeout time.Duration) (b []byte, err error)
 		},
 		Body:          ioutil.NopCloser(bytes.NewReader(body)),
 		ContentLength: int64(len(body)),
-		Host:          dst,
+		Host:          c.apiURL.Host,
 	}
 	if info := c.req.Header.Get(dapperHeader); info != "" {
 		hreq.Header.Set(dapperHeader, info)
+	}
+	if info := c.req.Header.Get(traceHeader); info != "" {
+		hreq.Header.Set(traceHeader, info)
 	}
 
 	tr := apiHTTPClient.Transport.(*http.Transport)
@@ -385,14 +450,27 @@ func (c *context) post(body []byte, timeout time.Duration) (b []byte, err error)
 }
 
 func Call(ctx netcontext.Context, service, method string, in, out proto.Message) error {
-	if f, ok := ctx.Value(&callOverrideKey).(callOverrideFunc); ok {
+	if ns := NamespaceFromContext(ctx); ns != "" {
+		if fn, ok := NamespaceMods[service]; ok {
+			fn(in, ns)
+		}
+	}
+
+	if f, ctx, ok := callOverrideFromContext(ctx); ok {
 		return f(ctx, service, method, in, out)
+	}
+
+	// Handle already-done contexts quickly.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	c := fromContext(ctx)
 	if c == nil {
 		// Give a good error message rather than a panic lower down.
-		return errors.New("not an App Engine context")
+		return errNotAppEngineContext
 	}
 
 	// Apply transaction modifications if we're in a transaction.
@@ -415,6 +493,16 @@ func Call(ctx netcontext.Context, service, method string, in, out proto.Message)
 	}
 
 	ticket := c.req.Header.Get(ticketHeader)
+	// Use a test ticket under test environment.
+	if ticket == "" {
+		if appid := ctx.Value(&appIDOverrideKey); appid != nil {
+			ticket = appid.(string) + defaultTicketSuffix
+		}
+	}
+	// Fall back to use background ticket when the request ticket is not available in Flex or dev_appserver.
+	if ticket == "" {
+		ticket = DefaultTicket()
+	}
 	req := &remotepb.Request{
 		ServiceName: &service,
 		Method:      &method,
@@ -490,6 +578,9 @@ var logLevelName = map[int64]string{
 }
 
 func logf(c *context, level int64, format string, args ...interface{}) {
+	if c == nil {
+		panic("not an App Engine context")
+	}
 	s := fmt.Sprintf(format, args...)
 	s = strings.TrimRight(s, "\n") // Remove any trailing newline characters.
 	c.addLogLine(&logpb.UserAppLogLine{

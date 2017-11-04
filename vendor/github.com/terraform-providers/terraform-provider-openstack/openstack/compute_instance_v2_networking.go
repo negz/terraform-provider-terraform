@@ -317,7 +317,13 @@ func getInstanceAddresses(addresses map[string]interface{}) []InstanceAddresses 
 
 		for _, v := range v.([]interface{}) {
 			instanceNIC := InstanceNIC{}
+			var exists bool
+
 			v := v.(map[string]interface{})
+			if v, ok := v["OS-EXT-IPS-MAC:mac_addr"].(string); ok {
+				instanceNIC.MAC = v
+			}
+
 			if v["OS-EXT-IPS:type"] == "fixed" {
 				switch v["version"].(float64) {
 				case 6:
@@ -327,11 +333,23 @@ func getInstanceAddresses(addresses map[string]interface{}) []InstanceAddresses 
 				}
 			}
 
-			if v, ok := v["OS-EXT-IPS-MAC:mac_addr"].(string); ok {
-				instanceNIC.MAC = v
+			// To associate IPv4 and IPv6 on the right NIC,
+			// key on the mac address and fill in the blanks.
+			for i, v := range instanceAddresses.InstanceNICs {
+				if v.MAC == instanceNIC.MAC {
+					exists = true
+					if instanceNIC.FixedIPv6 != "" {
+						instanceAddresses.InstanceNICs[i].FixedIPv6 = instanceNIC.FixedIPv6
+					}
+					if instanceNIC.FixedIPv4 != "" {
+						instanceAddresses.InstanceNICs[i].FixedIPv4 = instanceNIC.FixedIPv4
+					}
+				}
 			}
 
-			instanceAddresses.InstanceNICs = append(instanceAddresses.InstanceNICs, instanceNIC)
+			if !exists {
+				instanceAddresses.InstanceNICs = append(instanceAddresses.InstanceNICs, instanceNIC)
+			}
 		}
 
 		allInstanceAddresses = append(allInstanceAddresses, instanceAddresses)
@@ -395,7 +413,7 @@ func flattenInstanceNetworks(
 					"name":        instanceAddresses.NetworkName,
 					"fixed_ip_v4": instanceNIC.FixedIPv4,
 					"fixed_ip_v6": instanceNIC.FixedIPv6,
-					"mac":         instanceNIC.FixedIPv6,
+					"mac":         instanceNIC.MAC,
 				}
 				networks = append(networks, v)
 			}
@@ -417,7 +435,7 @@ func flattenInstanceNetworks(
 					"name":           instanceAddresses.NetworkName,
 					"fixed_ip_v4":    instanceNIC.FixedIPv4,
 					"fixed_ip_v6":    instanceNIC.FixedIPv6,
-					"mac":            instanceNIC.FixedIPv6,
+					"mac":            instanceNIC.MAC,
 					"uuid":           instanceNetwork.UUID,
 					"port":           instanceNetwork.Port,
 					"access_network": instanceNetwork.AccessNetwork,

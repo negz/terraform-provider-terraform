@@ -21,9 +21,9 @@ func resourceLoadBalancerV2() *schema.Resource {
 		Delete: resourceLoadBalancerV2Delete,
 
 		Timeouts: &schema.ResourceTimeout{
-			Create: schema.DefaultTimeout(20 * time.Minute),
-			Update: schema.DefaultTimeout(20 * time.Minute),
-			Delete: schema.DefaultTimeout(10 * time.Minute),
+			Create: schema.DefaultTimeout(10 * time.Minute),
+			Update: schema.DefaultTimeout(10 * time.Minute),
+			Delete: schema.DefaultTimeout(5 * time.Minute),
 		},
 
 		Schema: map[string]*schema.Schema{
@@ -79,14 +79,6 @@ func resourceLoadBalancerV2() *schema.Resource {
 				Type:     schema.TypeString,
 				Optional: true,
 				ForceNew: true,
-			},
-
-			"provider": &schema.Schema{
-				Type:       schema.TypeString,
-				Optional:   true,
-				Computed:   true,
-				ForceNew:   true,
-				Deprecated: "Please use loadbalancer_provider",
 			},
 
 			"loadbalancer_provider": &schema.Schema{
@@ -275,9 +267,10 @@ func resourceLoadBalancerV2Delete(d *schema.ResourceData, meta interface{}) erro
 
 func resourceLoadBalancerV2SecurityGroups(networkingClient *gophercloud.ServiceClient, vipPortID string, d *schema.ResourceData) error {
 	if vipPortID != "" {
-		if _, ok := d.GetOk("security_group_ids"); ok {
+		if v, ok := d.GetOk("security_group_ids"); ok {
+			securityGroups := resourcePortSecurityGroupsV2(v.(*schema.Set))
 			updateOpts := ports.UpdateOpts{
-				SecurityGroups: resourcePortSecurityGroupsV2(d),
+				SecurityGroups: &securityGroups,
 			}
 
 			log.Printf("[DEBUG] Adding security groups to loadbalancer "+

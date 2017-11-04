@@ -55,43 +55,44 @@ func resourceMonitorV2() *schema.Resource {
 				Required: true,
 				ForceNew: true,
 			},
+
 			"delay": &schema.Schema{
 				Type:     schema.TypeInt,
 				Required: true,
 			},
+
 			"timeout": &schema.Schema{
 				Type:     schema.TypeInt,
 				Required: true,
 			},
+
 			"max_retries": &schema.Schema{
 				Type:     schema.TypeInt,
 				Required: true,
 			},
+
 			"url_path": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 			},
+
 			"http_method": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 			},
+
 			"expected_codes": &schema.Schema{
 				Type:     schema.TypeString,
 				Optional: true,
 				Computed: true,
 			},
+
 			"admin_state_up": &schema.Schema{
 				Type:     schema.TypeBool,
 				Default:  true,
 				Optional: true,
-			},
-
-			"id": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
 			},
 		},
 	}
@@ -137,6 +138,10 @@ func resourceMonitorV2Create(d *schema.ResourceData, meta interface{}) error {
 		return nil
 	})
 
+	if err != nil {
+		return fmt.Errorf("Unable to create monitor: %s", err)
+	}
+
 	err = waitForLBV2viaPool(networkingClient, poolID, "ACTIVE", timeout)
 	if err != nil {
 		return err
@@ -161,7 +166,6 @@ func resourceMonitorV2Read(d *schema.ResourceData, meta interface{}) error {
 
 	log.Printf("[DEBUG] Retrieved monitor %s: %#v", d.Id(), monitor)
 
-	d.Set("id", monitor.ID)
 	d.Set("tenant_id", monitor.TenantID)
 	d.Set("type", monitor.Type)
 	d.Set("delay", monitor.Delay)

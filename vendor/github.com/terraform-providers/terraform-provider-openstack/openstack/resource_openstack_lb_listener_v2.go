@@ -86,6 +86,7 @@ func resourceListenerV2() *schema.Resource {
 			"connection_limit": &schema.Schema{
 				Type:     schema.TypeInt,
 				Optional: true,
+				Computed: true,
 			},
 
 			"default_tls_container_ref": &schema.Schema{
@@ -104,12 +105,6 @@ func resourceListenerV2() *schema.Resource {
 				Default:  true,
 				Optional: true,
 			},
-
-			"id": &schema.Schema{
-				Type:     schema.TypeString,
-				Optional: true,
-				Computed: true,
-			},
 		},
 	}
 }
@@ -122,7 +117,6 @@ func resourceListenerV2Create(d *schema.ResourceData, meta interface{}) error {
 	}
 
 	adminStateUp := d.Get("admin_state_up").(bool)
-	connLimit := d.Get("connection_limit").(int)
 	var sniContainerRefs []string
 	if raw, ok := d.GetOk("sni_container_refs"); ok {
 		for _, v := range raw.([]interface{}) {
@@ -137,10 +131,14 @@ func resourceListenerV2Create(d *schema.ResourceData, meta interface{}) error {
 		Name:                   d.Get("name").(string),
 		DefaultPoolID:          d.Get("default_pool_id").(string),
 		Description:            d.Get("description").(string),
-		ConnLimit:              &connLimit,
 		DefaultTlsContainerRef: d.Get("default_tls_container_ref").(string),
 		SniContainerRefs:       sniContainerRefs,
 		AdminStateUp:           &adminStateUp,
+	}
+
+	if v, ok := d.GetOk("connection_limit"); ok {
+		connectionLimit := v.(int)
+		createOpts.ConnLimit = &connectionLimit
 	}
 
 	log.Printf("[DEBUG] Create Options: %#v", createOpts)
@@ -191,7 +189,6 @@ func resourceListenerV2Read(d *schema.ResourceData, meta interface{}) error {
 
 	log.Printf("[DEBUG] Retrieved listener %s: %#v", d.Id(), listener)
 
-	d.Set("id", listener.ID)
 	d.Set("name", listener.Name)
 	d.Set("protocol", listener.Protocol)
 	d.Set("tenant_id", listener.TenantID)
